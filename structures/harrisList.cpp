@@ -6,6 +6,8 @@
 #include <cassert>
 #include <functional>
 #include <thread>
+#include <vector>
+#include <chrono>
 
 struct Node;
 
@@ -184,7 +186,7 @@ public:
 
     // TODO destructor
 
-    void print()
+    void print() // not thread-safe
     {
         int size = 0;
         std::cout << "--- Printing list: " << std::endl;
@@ -198,6 +200,18 @@ public:
         std::cout << "--- Size: " << size << std::endl;
         std::cout << "--- End of list" << std::endl;
     }
+
+    int size() // not thread-safe
+    {
+        int size = 0;
+        Node *t = head;
+        while (t != tail)
+        {
+            size += 1;
+            t = t->next.load().ptr;
+        }
+        return size;
+    }
 };
 
 class LinearCongruentialGenerator
@@ -209,6 +223,9 @@ private:
     unsigned long current;
 
 public:
+    LinearCongruentialGenerator()
+        : a(0), b(0), m(0), current(0) {}
+
     LinearCongruentialGenerator(int a, int b, int m, int seed)
         : a(a), b(b), m(m), current(seed) {}
 
@@ -219,16 +236,55 @@ public:
     }
 };
 
+const int A = 48271, B = 3885;
+const int MAX = 5e8;
+
+typedef std::pair<int, int> Operation;
+class OperationGenerator
+{
+private:
+    int seed;
+    int mn;
+    int mx;
+    int iratio;
+    LinearCongruentialGenerator gen;
+
+public:
+    OperationGenerator(int seed, int mn, int mx, int iratio)
+    {
+        this->seed = seed;
+        this->mn = mn;
+        this->mx = mx;
+        this->iratio = iratio;
+        gen = LinearCongruentialGenerator(A, B, mx - mn, seed);
+    }
+
+    Operation next()
+    {
+        int op = gen.next() % 100;
+        int key = gen.next() % (mx - mn) + mn;
+        if (op < iratio)
+        {
+            return Operation(0, key);
+        }
+        else
+        {
+            return Operation(1, key);
+        }
+    }
+};
+
 void multi_test(int thread_count)
 {
     HarrisList list;
 
-    const int MAX = 5e8;
+    // const int INIT_SIZE = 50;
     const int INIT_SIZE = 2e4;
     const int TOTAL_SIZE = 5e5;
-    const int A = 48271, B = 3885;
 
     // std::set<int> keys;
+    std::vector<Operation> ops;
+    std::set<Operation> op_set;
 
     int time_seed = std::chrono::system_clock::now().time_since_epoch().count() % 1000000;
     std::cout << "Seed: " << time_seed << std::endl;
@@ -239,80 +295,108 @@ void multi_test(int thread_count)
     {
         std::cout << " --- Initial test --- " << std::endl;
         auto seed = time_seed * 1000 + (-1);
-        auto gen = LinearCongruentialGenerator(A, B, MAX, seed);
+
+        std::cout << "Inserting initial elements" << std::endl;
+        auto gen = OperationGenerator(seed, 10, MAX, 100);
         for (int i = 0; i < INIT_SIZE; i++)
         {
-            int key = gen.next();
-            // keys.insert(key);
-            list.insert(key);
+            auto op = gen.next();
+            assert(op.first == 0);
+            list.insert(op.second);
+            ops.push_back(op);
+            op_set.insert(op);
         }
 
+        std::cout << "Checking initial elements" << std::endl;
         for (int i = 0; i < 1000; i++)
         {
-            auto re_gen = LinearCongruentialGenerator(A, B, MAX, seed);
-            int step = mt_gen() % INIT_SIZE;
-            for (int j = 0; j < step; j++)
-            {
-                re_gen.next();
-            }
-            int key = re_gen.next();
-            assert(list.find(key));
+            int pos = mt_gen() % INIT_SIZE;
+            auto op = ops[pos];
+            assert(op.first == 0);
+            assert(list.find(op.second));
         }
-        assert(!list.find(MAX + 10));
+        assert(!list.find(5));
         assert(!list.find(MAX / 2));
+        assert(!list.find(MAX + 10));
         std::cout << " --- End of initial test --- " << std::endl;
     }
 
-    // spawn insert threads
-    auto thread_func = [&](int id)
+    // multiple threads
     {
-        auto seed = time_seed * 1000 + id;
-        auto gen = LinearCongruentialGenerator(A, B, MAX, seed);
-        int count = (TOTAL_SIZE - INIT_SIZE) / thread_count;
+        std::cout << " --- Multi test --- " << std::endl;
+        std::atomic<int> size(0);
+        size.store(list.size());
 
-        // insert random elements
-        for (int i = 0; i < count; i++)
+        auto thread_func = [&](int id)
         {
-            if (i % 1000 == 0)
+            auto seed = time_seed * 1000 + id;
+            auto gen = OperationGenerator(seed, 10, MAX, 50);
+            int count = (TOTAL_SIZE - INIT_SIZE) / thread_count;
+
+            for (int i = 0; i < count; i++)
             {
-                std::cout << "Thread " << id << " inserting " << i << "th element" << std::endl;
+                Operation op = gen.next();
+                if (i % 5000 == 0)
+                {
+                    std::cout << "Thread " << id << " : " << i << " / " << count << " : " << op.first << " " << op.second << std::endl;
+                }
+                if (op.first == 0)
+                {
+                    bool success = list.insert(op.second);
+                    if (success)
+                    {
+                        size.fetch_add(1);
+                    }
+                }
+                else
+                {
+                    bool success = list.erase(op.second);
+                    if (success)
+                    {
+                        size.fetch_sub(1);
+                    }
+                }
             }
-            int key = gen.next();
-            list.insert(key);
-        }
-    };
+        };
 
-    std::cout << " --- Multi insert test --- " << std::endl;
-    std::vector<std::thread> threads;
-    for (int i = 0; i < thread_count; i++)
-    {
-        threads.push_back(std::thread(thread_func, i));
-    }
-
-    for (auto &t : threads)
-    {
-        t.join();
-    }
-    // test for single thread
-    {
-        std::cout << " --- Check multi insert --- " << std::endl;
-        int tid = mt_gen() % thread_count;
-        int seed = time_seed * 1000 + tid;
-        for (int i = 0; i < 1000; i++)
+        std::cout << "Starting threads" << std::endl;
+        auto start = std::chrono::high_resolution_clock::now();
+        std::vector<std::thread> threads;
+        for (int i = 0; i < thread_count; i++)
         {
-            auto re_gen = LinearCongruentialGenerator(A, B, MAX, seed);
-            int step = mt_gen() % ((TOTAL_SIZE - INIT_SIZE) / thread_count);
-            for (int j = 0; j < step; j++)
-            {
-                re_gen.next();
-            }
-            int key = re_gen.next();
-            assert(list.find(key));
+            threads.push_back(std::thread(thread_func, i));
         }
-        std::cout << " --- End of multi insert test --- " << std::endl;
-    }
 
-    // random insert, erase, find
+        for (auto &t : threads)
+        {
+            t.join();
+        }
+        auto end = std::chrono::high_resolution_clock::now();
+        std::cout << "Elapsed time: " << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() << "ms" << std::endl;
+
+        std::cout << "Checking list size" << std::endl;
+        std::cout << "List size (tracked) " << size.load() << std::endl;
+        std::cout << "List size (real): " << list.size() << std::endl;
+        assert(size.load() == list.size());
+
+        // reconstruct operations to check
+        std::cout << "Reconstructing operations" << std::endl;
+        for (int tid = 0; tid < thread_count; tid++)
+        {
+            auto seed = time_seed * 1000 + tid;
+            auto gen = OperationGenerator(seed, 10, MAX, 50);
+            int count = (TOTAL_SIZE - INIT_SIZE) / thread_count;
+            for (int i = 0; i < count; i++)
+            {
+                ops.push_back(gen.next());
+                op_set.insert(ops.back());
+            }
+        }
+
+        // check ops set
+
+        std::cout << " --- End of multi test --- " << std::endl;
+    }
 
     // print
     std::cout << " --- End of all tests --- " << std::endl;
@@ -320,8 +404,9 @@ void multi_test(int thread_count)
 
 int main()
 {
+    // assert(false);
 
-    multi_test(16);
+    multi_test(8);
     return 0;
 
     HarrisList list;

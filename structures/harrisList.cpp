@@ -12,33 +12,35 @@
 
 struct Node;
 
-struct NdPtr
+Node *set_mark(Node *ptr)
 {
-    Node *ptr;
-    bool marked; // change to lower bit?
-    NdPtr(Node *p = nullptr, bool m = false) : ptr(p), marked(m) {}
-};
+    return (Node *)((uintptr_t)ptr | 1);
+}
+Node *unset_mark(Node *ptr)
+{
+    static const uintptr_t mask = ~1;
+    return (Node *)((uintptr_t)ptr & mask);
+}
+bool get_mark(void *ptr)
+{
+    return (uintptr_t)ptr & 1;
+}
 
 struct Node
 {
     int key;
-    std::atomic<NdPtr> _next;
     std::atomic<Node *> next;
     Node(int k = 0) : key(k) {}
+
     // print key, ptr, mark for debugging
     void print()
     {
-        std::cout << "Node : " << key << " " << _next.load().ptr << " " << _next.load().marked << std::endl;
+        std::cout << "Node : " << key << " " << next.load() << " " << get_mark(next.load()) << std::endl;
     }
     void debug_info()
     {
-        // print architechtural details, e.g. size, is it atomic, etc.
-
         std::cout << " --- Node Debug Info ---" << std::endl;
         std::cout << "Node size : " << sizeof(Node) << std::endl;
-        std::cout << "Node ptr size : " << sizeof(NdPtr) << std::endl;
-        std::cout << "Node _next size : " << sizeof(std::atomic<NdPtr>) << std::endl;
-        std::cout << "Node _next is lock free : " << _next.is_lock_free() << ", " << std::atomic_is_lock_free(&_next) << std::endl;
         std::cout << std::endl;
         std::cout << "Node next size : " << sizeof(Node *) << std::endl;
         std::cout << "Node next is lock free : " << next.is_lock_free() << ", " << std::atomic_is_lock_free(&next) << std::endl;
@@ -46,15 +48,6 @@ struct Node
                   << std::endl;
     }
 };
-Node *set_mark(Node *ptr, bool mark)
-{
-    uintptr_t bit = mark ? 1 : 0;
-    return (Node *)((uintptr_t)ptr | bit);
-}
-bool get_mark(void *ptr)
-{
-    return (uintptr_t)ptr & 1;
-}
 
 typedef std::pair<Node *, Node *> NodePair;
 
@@ -66,7 +59,7 @@ struct HarrisList
     {
         head = new Node();
         tail = new Node();
-        head->_next.store(NdPtr(tail, false));
+        head->next.store(tail);
     }
 
     ~HarrisList()
@@ -75,7 +68,7 @@ struct HarrisList
         while (t != tail)
         {
             Node *tmp = t;
-            t = t->_next.load().ptr;
+            t = t->next.load();
             delete tmp;
         }
         delete tail;
@@ -92,7 +85,6 @@ public:
             NodePair nodes = search(key);
             left_node = nodes.first;
             right_node = nodes.second;
-            NdPtr right_node_ptr = NdPtr(right_node, false);
 
             // Already have it
             if ((right_node != tail) && (right_node->key == key)) // T1
@@ -101,12 +93,12 @@ public:
             }
 
             // Prepare new node
-            new_node->_next.store(right_node_ptr);
+            new_node->next.store(right_node);
 
             // Swap the new node in
             // if right node is changed, or marked to be deleted, restart the process
-            bool same_state = left_node->_next.compare_exchange_strong(
-                right_node_ptr, (NdPtr(new_node, false)));
+            bool same_state = left_node->next.compare_exchange_strong(
+                right_node, new_node);
             if (same_state) // C2
             {
                 return true;
@@ -117,7 +109,7 @@ public:
     bool erase(int key)
     {
         Node *right_node, *left_node;
-        NdPtr right_node_next;
+        Node *right_node_next;
 
         do
         {
@@ -132,11 +124,11 @@ public:
             }
 
             // Try to mark the node
-            right_node_next = right_node->_next.load();
-            if (!right_node_next.marked)
+            right_node_next = right_node->next.load();
+            if (!get_mark(right_node_next))
             {
-                bool same_state = right_node->_next.compare_exchange_strong(
-                    right_node_next, NdPtr(right_node_next.ptr, true)); // C3
+                bool same_state = right_node->next.compare_exchange_strong(
+                    right_node_next, set_mark(right_node_next)); // C3
                 if (same_state)
                 {
                     break;
@@ -145,9 +137,8 @@ public:
         } while (true); // B4
 
         // Remove node from list
-        NdPtr right_node_ptr = NdPtr(right_node, false);
-        bool did_erase = left_node->_next.compare_exchange_strong(
-            right_node_ptr, right_node_next); // C4
+        bool did_erase = left_node->next.compare_exchange_strong(
+            right_node, right_node_next); // C4
         if (!did_erase)
         {
             search(key);
@@ -168,30 +159,30 @@ public:
         do
         {
             Node *t = head;
-            NdPtr t_next = head->_next.load();
+            Node *t_next = head->next.load();
 
             // Find left_node and right_node
             do
             {
-                if (!t_next.marked)
+                if (!get_mark(t_next))
                 {
                     left_node = t;
-                    left_node_next = t_next.ptr;
+                    left_node_next = t_next;
                 }
-                t = t_next.ptr;
+                t = unset_mark(t_next);
                 if (t == tail)
                 {
                     break;
                 }
-                t_next = t->_next.load();
+                t_next = t->next.load();
 
-            } while (t_next.marked || t->key < search_key); // B1
+            } while (get_mark(t_next) || t->key < search_key); // B1
             right_node = t;
 
             // Check if nodes are adjacent
             if (left_node_next == right_node)
             {
-                if ((right_node != tail) && right_node->_next.load().marked)
+                if ((right_node != tail) && get_mark(right_node->next.load()))
                 {
                     continue; // G1
                 }
@@ -199,12 +190,12 @@ public:
             }
 
             // Remove one or more marked nodes in between
-            NdPtr _tmp_left_next = NdPtr(left_node_next, false);
-            bool same_state = left_node->_next.compare_exchange_strong(
-                _tmp_left_next, NdPtr(right_node, false)); // C1
+            Node *_tmp_left_next = unset_mark(left_node_next);
+            bool same_state = left_node->next.compare_exchange_strong(
+                _tmp_left_next, right_node); // C1
             if (same_state)
             {
-                if ((right_node != tail) && right_node->_next.load().marked)
+                if ((right_node != tail) && get_mark(right_node->next.load()))
                 {
                     continue; // G2
                 }
@@ -222,7 +213,7 @@ public:
         {
             t->print();
             size += 1;
-            t = t->_next.load().ptr;
+            t = t->next.load();
         }
         std::cout << "--- Size: " << size << std::endl;
         std::cout << "--- End of list" << std::endl;
@@ -235,7 +226,7 @@ public:
         while (t != tail)
         {
             size += 1;
-            t = t->_next.load().ptr;
+            t = t->next.load();
         }
         return size;
     }
@@ -247,7 +238,7 @@ public:
         while (t != tail)
         {
             sum += t->key;
-            t = t->_next.load().ptr;
+            t = t->next.load();
         }
         return sum;
     }
@@ -398,6 +389,8 @@ void multi_test(int thread_count, int init_size = 100, int ops_count = 1000, int
                     {
                         local_size += 1;
                         local_sum += op.second;
+                        // std::string s = "Thread " + std::to_string(id) + " inserted " + std::to_string(op.second);
+                        // std::cout << s << std::endl;
                     }
                 }
                 else
@@ -407,6 +400,8 @@ void multi_test(int thread_count, int init_size = 100, int ops_count = 1000, int
                     {
                         local_size -= 1;
                         local_sum -= op.second;
+                        // std::string s = "Thread " + std::to_string(id) + " erased " + std::to_string(op.second);
+                        // std::cout << s << std::endl;
                     }
                 }
             }

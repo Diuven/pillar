@@ -22,14 +22,39 @@ struct NdPtr
 struct Node
 {
     int key;
-    std::atomic<NdPtr> next;
+    std::atomic<NdPtr> _next;
+    std::atomic<Node *> next;
     Node(int k = 0) : key(k) {}
     // print key, ptr, mark for debugging
     void print()
     {
-        std::cout << "Node : " << key << " " << next.load().ptr << " " << next.load().marked << std::endl;
+        std::cout << "Node : " << key << " " << _next.load().ptr << " " << _next.load().marked << std::endl;
+    }
+    void debug_info()
+    {
+        // print architechtural details, e.g. size, is it atomic, etc.
+
+        std::cout << " --- Node Debug Info ---" << std::endl;
+        std::cout << "Node size : " << sizeof(Node) << std::endl;
+        std::cout << "Node ptr size : " << sizeof(NdPtr) << std::endl;
+        std::cout << "Node _next size : " << sizeof(std::atomic<NdPtr>) << std::endl;
+        std::cout << "Node _next is lock free : " << _next.is_lock_free() << ", " << std::atomic_is_lock_free(&_next) << std::endl;
+        std::cout << std::endl;
+        std::cout << "Node next size : " << sizeof(Node *) << std::endl;
+        std::cout << "Node next is lock free : " << next.is_lock_free() << ", " << std::atomic_is_lock_free(&next) << std::endl;
+        std::cout << " --- End of Node Debug Info ---" << std::endl
+                  << std::endl;
     }
 };
+Node *set_mark(Node *ptr, bool mark)
+{
+    uintptr_t bit = mark ? 1 : 0;
+    return (Node *)((uintptr_t)ptr | bit);
+}
+bool get_mark(void *ptr)
+{
+    return (uintptr_t)ptr & 1;
+}
 
 typedef std::pair<Node *, Node *> NodePair;
 
@@ -41,7 +66,7 @@ struct HarrisList
     {
         head = new Node();
         tail = new Node();
-        head->next.store(NdPtr(tail, false));
+        head->_next.store(NdPtr(tail, false));
     }
 
     ~HarrisList()
@@ -50,7 +75,7 @@ struct HarrisList
         while (t != tail)
         {
             Node *tmp = t;
-            t = t->next.load().ptr;
+            t = t->_next.load().ptr;
             delete tmp;
         }
         delete tail;
@@ -76,11 +101,11 @@ public:
             }
 
             // Prepare new node
-            new_node->next.store(right_node_ptr);
+            new_node->_next.store(right_node_ptr);
 
             // Swap the new node in
             // if right node is changed, or marked to be deleted, restart the process
-            bool same_state = left_node->next.compare_exchange_strong(
+            bool same_state = left_node->_next.compare_exchange_strong(
                 right_node_ptr, (NdPtr(new_node, false)));
             if (same_state) // C2
             {
@@ -107,10 +132,10 @@ public:
             }
 
             // Try to mark the node
-            right_node_next = right_node->next.load();
+            right_node_next = right_node->_next.load();
             if (!right_node_next.marked)
             {
-                bool same_state = right_node->next.compare_exchange_strong(
+                bool same_state = right_node->_next.compare_exchange_strong(
                     right_node_next, NdPtr(right_node_next.ptr, true)); // C3
                 if (same_state)
                 {
@@ -121,7 +146,7 @@ public:
 
         // Remove node from list
         NdPtr right_node_ptr = NdPtr(right_node, false);
-        bool did_erase = left_node->next.compare_exchange_strong(
+        bool did_erase = left_node->_next.compare_exchange_strong(
             right_node_ptr, right_node_next); // C4
         if (!did_erase)
         {
@@ -143,7 +168,7 @@ public:
         do
         {
             Node *t = head;
-            NdPtr t_next = head->next.load();
+            NdPtr t_next = head->_next.load();
 
             // Find left_node and right_node
             do
@@ -158,7 +183,7 @@ public:
                 {
                     break;
                 }
-                t_next = t->next.load();
+                t_next = t->_next.load();
 
             } while (t_next.marked || t->key < search_key); // B1
             right_node = t;
@@ -166,7 +191,7 @@ public:
             // Check if nodes are adjacent
             if (left_node_next == right_node)
             {
-                if ((right_node != tail) && right_node->next.load().marked)
+                if ((right_node != tail) && right_node->_next.load().marked)
                 {
                     continue; // G1
                 }
@@ -175,11 +200,11 @@ public:
 
             // Remove one or more marked nodes in between
             NdPtr _tmp_left_next = NdPtr(left_node_next, false);
-            bool same_state = left_node->next.compare_exchange_strong(
+            bool same_state = left_node->_next.compare_exchange_strong(
                 _tmp_left_next, NdPtr(right_node, false)); // C1
             if (same_state)
             {
-                if ((right_node != tail) && right_node->next.load().marked)
+                if ((right_node != tail) && right_node->_next.load().marked)
                 {
                     continue; // G2
                 }
@@ -197,7 +222,7 @@ public:
         {
             t->print();
             size += 1;
-            t = t->next.load().ptr;
+            t = t->_next.load().ptr;
         }
         std::cout << "--- Size: " << size << std::endl;
         std::cout << "--- End of list" << std::endl;
@@ -210,7 +235,7 @@ public:
         while (t != tail)
         {
             size += 1;
-            t = t->next.load().ptr;
+            t = t->_next.load().ptr;
         }
         return size;
     }
@@ -222,7 +247,7 @@ public:
         while (t != tail)
         {
             sum += t->key;
-            t = t->next.load().ptr;
+            t = t->_next.load().ptr;
         }
         return sum;
     }
@@ -443,6 +468,9 @@ void multi_test(int thread_count, int init_size = 100, int ops_count = 1000, int
 
 int main()
 {
+    Node *test = new Node(5);
+    test->debug_info();
+    delete test;
     // assert(false);
 
     // Test 0

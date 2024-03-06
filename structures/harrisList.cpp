@@ -307,7 +307,7 @@ public:
     }
 };
 
-void multi_test(int thread_count, int init_size = 100, int ops_count = 1000, int elem_max = -1)
+int multi_test(int thread_count, int init_size = 100, int ops_count = 1000, int elem_max = -1, bool print = true)
 {
     HarrisList list;
 
@@ -323,16 +323,19 @@ void multi_test(int thread_count, int init_size = 100, int ops_count = 1000, int
     std::set<Operation> op_set;
 
     int time_seed = std::chrono::system_clock::now().time_since_epoch().count() % 1000000;
-    std::cout << "Seed: " << time_seed << std::endl;
+    if (print)
+        std::cout << "Seed: " << time_seed << std::endl;
     auto mt_gen = std::mt19937(time_seed);
     std::uniform_int_distribution<int> distribution(1, elem_max);
 
     // fill list with initial elements and test
     {
-        std::cout << " --- Initial test --- " << std::endl;
+        if (print)
+            std::cout << " --- Initial test --- " << std::endl;
         auto seed = time_seed * 1000 + (-1);
 
-        std::cout << "Inserting initial elements" << std::endl;
+        if (print)
+            std::cout << "Inserting initial elements" << std::endl;
         auto gen = OperationGenerator(seed, 10, elem_max, 100);
         for (int i = 0; i < init_size; i++)
         {
@@ -343,7 +346,8 @@ void multi_test(int thread_count, int init_size = 100, int ops_count = 1000, int
             op_set.insert(op);
         }
 
-        std::cout << "Checking initial elements" << std::endl;
+        if (print)
+            std::cout << "Checking initial elements" << std::endl;
         for (int i = 0; i < 1000; i++)
         {
             int pos = mt_gen() % init_size;
@@ -354,13 +358,17 @@ void multi_test(int thread_count, int init_size = 100, int ops_count = 1000, int
         assert(!list.find(5));
         // assert(!list.find(elem_max / 2));
         assert(!list.find(elem_max + 10));
-        std::cout << " --- End of initial test --- " << std::endl
-                  << std::endl;
+        if (print)
+            std::cout << " --- End of initial test --- " << std::endl
+                      << std::endl;
     }
 
+    auto start = std::chrono::high_resolution_clock::now();
+    auto end = std::chrono::high_resolution_clock::now();
     // multiple threads
     {
-        std::cout << " --- Multi test --- " << std::endl;
+        if (print)
+            std::cout << " --- Multi test --- " << std::endl;
         std::atomic<int> size(0);
         size.store(list.size());
         std::atomic<long long> sum(0);
@@ -377,7 +385,7 @@ void multi_test(int thread_count, int init_size = 100, int ops_count = 1000, int
             for (int i = 0; i < count; i++)
             {
                 Operation op = gen.next();
-                if (i % 5000 == 0)
+                if (i % 5000 == 0 && print)
                 {
                     std::string s = "Thread " + std::to_string(id) + " : " + std::to_string(i) + " / " + std::to_string(count) + " : " + std::to_string(op.first) + " " + std::to_string(op.second);
                     std::cout << s << std::endl;
@@ -410,8 +418,9 @@ void multi_test(int thread_count, int init_size = 100, int ops_count = 1000, int
             sum.fetch_add(local_sum);
         };
 
-        std::cout << "Starting threads" << std::endl;
-        auto start = std::chrono::high_resolution_clock::now();
+        if (print)
+            std::cout << "Starting threads" << std::endl;
+        start = std::chrono::high_resolution_clock::now();
         std::vector<std::thread> threads;
         for (int i = 0; i < thread_count; i++)
         {
@@ -422,18 +431,21 @@ void multi_test(int thread_count, int init_size = 100, int ops_count = 1000, int
         {
             t.join();
         }
-        auto end = std::chrono::high_resolution_clock::now();
-        std::cout << "Elapsed time: " << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() << "ms" << std::endl
-                  << std::endl;
+        end = std::chrono::high_resolution_clock::now();
+        if (print)
+        {
+            std::cout << "Elapsed time: " << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() << "ms" << std::endl
+                      << std::endl;
 
-        std::cout << "Checking list size" << std::endl;
-        std::cout << "List size (tracked) " << size.load() << std::endl;
-        std::cout << "List size (real): " << list.size() << std::endl;
+            std::cout << "Checking list size" << std::endl;
+            std::cout << "List size (tracked) " << size.load() << std::endl;
+            std::cout << "List size (real): " << list.size() << std::endl;
+
+            std::cout << "Checking list sum" << std::endl;
+            std::cout << "List sum (tracked) " << sum.load() << std::endl;
+            std::cout << "List sum (real): " << list.sum() << std::endl;
+        }
         assert(size.load() == list.size());
-
-        std::cout << "Checking list sum" << std::endl;
-        std::cout << "List sum (tracked) " << sum.load() << std::endl;
-        std::cout << "List sum (real): " << list.sum() << std::endl;
         assert(sum.load() == list.sum());
 
         // // reconstruct operations to check
@@ -452,13 +464,16 @@ void multi_test(int thread_count, int init_size = 100, int ops_count = 1000, int
 
         // check ops set
 
-        std::cout << " --- End of multi test --- " << std::endl;
+        if (print)
+            std::cout << " --- End of multi test --- " << std::endl;
     }
 
     // print
-    std::cout << " --- End of all tests --- " << std::endl
-              << std::endl
-              << std::endl;
+    if (print)
+        std::cout << " --- End of all tests --- " << std::endl
+                  << std::endl
+                  << std::endl;
+    return std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 }
 
 int main()
@@ -476,6 +491,31 @@ int main()
     multi_test(8, 100, 5000, 500);
     // Test 3
     multi_test(8, 10000, 50000, 10000);
+
+    int MAX_THREADS = 10;
+
+    int timings[16];
+
+    for (int ths = 1; ths <= MAX_THREADS; ths++)
+    {
+
+        int trials = 20;
+        int total = 0;
+        for (int i = 0; i < trials; i++)
+        {
+            int ms = multi_test(ths, 100, 50000, 10000, false);
+            total += ms;
+            std::cout << "Trial " << i << " : " << ms << "ms" << std::endl;
+        }
+        std::cout << "Average of " << ths << " threads :" << total / trials << "ms" << std::endl;
+        timings[ths] = total / trials;
+    }
+
+    std::cout << "Timings: ";
+    for (int i = 1; i <= MAX_THREADS; i++)
+    {
+        std::cout << "Average time for " << i << " threads: " << timings[i] << "ms\n";
+    }
 
     return 0;
 
